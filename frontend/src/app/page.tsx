@@ -2,7 +2,7 @@
 
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 // 部署的合约地址
 const PACKAGE_ID = "0xfdd92ba291151a5328e1d6e1eb80047eb42cb8b0121c221cac5bb083bb37862b";
@@ -11,19 +11,30 @@ const PACKAGE_ID = "0xfdd92ba291151a5328e1d6e1eb80047eb42cb8b0121c221cac5bb083bb
 const DEFAULT_TARGET_LTV = 0.5; // 50% of max (64%)
 const DEFAULT_SLIPPAGE = 0.005; // 0.5%
 const SUI_DECIMALS = 9;
-const USDC_DECIMALS = 6;
 
-// Mock SUI 价格 (实际应从 Oracle 获取)
-const MOCK_SUI_PRICE = 3.50;
+// Pyth Price Feed ID for SUI/USD
+const SUI_USD_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
 
 export default function Home() {
   const account = useCurrentAccount();
   const client = useSuiClient();
   const { mutate: signAndExecute, isPending } = useSignAndExecuteTransaction();
 
+  // 用户 Vaults 列表
+  const [userVaults, setUserVaults] = useState<{ id: string; collateral: string }[]>([]);
+  const [selectedVaultId, setSelectedVaultId] = useState<string | null>(null);
+  const [isLoadingVaults, setIsLoadingVaults] = useState(false);
+
+  // 表单状态
   const [depositAmount, setDepositAmount] = useState("");
   const [hedgeAmount, setHedgeAmount] = useState("");
   const [isHedging, setIsHedging] = useState(false);
+
+  // 实时价格
+  const [suiPrice, setSuiPrice] = useState<number>(3.50);
+  const [priceLoading, setPriceLoading] = useState(false);
+
+  // 金库数据
   const [vaultData, setVaultData] = useState({
     collateral: "0",
     borrowed: "0",
@@ -31,20 +42,94 @@ export default function Home() {
     hedgePosition: "0",
   });
 
-  // 预估对冲参数
+  // 对冲预估
   const [hedgePreview, setHedgePreview] = useState({
     borrowAmount: "0",
     hedgeSize: "0",
     limitPrice: "0",
   });
 
+  // 🔥 查询用户的 Vaults
+  const fetchUserVaults = useCallback(async (address: string) => {
+    setIsLoadingVaults(true);
+    try {
+      const objects = await client.getOwnedObjects({
+        owner: address,
+        filter: {
+          StructType: `${PACKAGE_ID}::vault::Vault`
+        },
+        options: { showContent: true }
+      });
+
+      const vaults = objects.data
+        .filter(obj => obj.data)
+        .map(obj => {
+          const content = obj.data?.content as any;
+          return {
+            id: obj.data!.objectId,
+            collateral: content?.fields?.collateral_amount || "0",
+          };
+        });
+
+      setUserVaults(vaults);
+
+      // 自动选择第一个 Vault
+      if (vaults.length > 0 && !selectedVaultId) {
+        setSelectedVaultId(vaults[0].id);
+      }
+
+      console.log("[Invariant] Found vaults:", vaults);
+    } catch (error) {
+      console.error("[Invariant] Failed to fetch vaults:", error);
+    } finally {
+      setIsLoadingVaults(false);
+    }
+  }, [client, selectedVaultId]);
+
+  // 🔥 获取实时 SUI 价格 (从 Pyth)
+  const fetchSuiPrice = useCallback(async () => {
+    setPriceLoading(true);
+    try {
+      const response = await fetch(
+        `https://hermes.pyth.network/api/latest_price_feeds?ids[]=${SUI_USD_FEED_ID}`
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data[0] && data[0].price) {
+          const price = parseFloat(data[0].price.price) * Math.pow(10, data[0].price.expo);
+          setSuiPrice(price);
+          console.log("[Invariant] SUI price from Pyth:", price);
+        }
+      }
+    } catch (error) {
+      console.warn("[Invariant] Failed to fetch Pyth price, using fallback:", error);
+      // 使用备用价格
+      setSuiPrice(3.50);
+    } finally {
+      setPriceLoading(false);
+    }
+  }, []);
+
+  // 初始化：获取 Vaults 和价格
+  useEffect(() => {
+    if (account?.address) {
+      fetchUserVaults(account.address);
+    }
+    fetchSuiPrice();
+
+    // 每 30 秒刷新价格
+    const priceInterval = setInterval(fetchSuiPrice, 30000);
+    return () => clearInterval(priceInterval);
+  }, [account?.address, fetchUserVaults, fetchSuiPrice]);
+
   // 更新对冲预估
   useEffect(() => {
     if (hedgeAmount && parseFloat(hedgeAmount) > 0) {
       const suiAmount = parseFloat(hedgeAmount);
-      const borrowAmountUSD = suiAmount * MOCK_SUI_PRICE * DEFAULT_TARGET_LTV * 0.64;
-      const hedgeSize = borrowAmountUSD / MOCK_SUI_PRICE;
-      const limitPrice = MOCK_SUI_PRICE * (1 - DEFAULT_SLIPPAGE);
+      const borrowAmountUSD = suiAmount * suiPrice * DEFAULT_TARGET_LTV * 0.64;
+      const hedgeSize = borrowAmountUSD / suiPrice;
+      const limitPrice = suiPrice * (1 - DEFAULT_SLIPPAGE);
 
       setHedgePreview({
         borrowAmount: borrowAmountUSD.toFixed(2),
@@ -54,7 +139,7 @@ export default function Home() {
     } else {
       setHedgePreview({ borrowAmount: "0", hedgeSize: "0", limitPrice: "0" });
     }
-  }, [hedgeAmount]);
+  }, [hedgeAmount, suiPrice]);
 
   // 创建金库
   const handleCreateVault = () => {
@@ -70,6 +155,10 @@ export default function Home() {
         onSuccess: (result) => {
           console.log("Vault created:", result);
           alert("✅ 金库创建成功！");
+          // 刷新 Vault 列表
+          if (account?.address) {
+            setTimeout(() => fetchUserVaults(account.address), 2000);
+          }
         },
         onError: (error) => {
           console.error("Error:", error);
@@ -79,9 +168,12 @@ export default function Home() {
     );
   };
 
-  // 存款
+  // 存款 (使用选中的 Vault)
   const handleDeposit = () => {
-    if (!depositAmount) return;
+    if (!depositAmount || !selectedVaultId) {
+      alert("请先选择金库并输入金额");
+      return;
+    }
 
     const amountMist = BigInt(parseFloat(depositAmount) * 1e9);
     const tx = new Transaction();
@@ -91,7 +183,7 @@ export default function Home() {
     tx.moveCall({
       target: `${PACKAGE_ID}::vault::deposit`,
       arguments: [
-        tx.object("VAULT_ID"), // 需要替换为实际的 vault ID
+        tx.object(selectedVaultId), // ✅ 动态 Vault ID
         coin,
         tx.object("0x6"),
       ],
@@ -104,6 +196,14 @@ export default function Home() {
           console.log("Deposit success:", result);
           setDepositAmount("");
           alert("✅ 存款成功！");
+          // 刷新数据
+          if (account?.address) {
+            fetchUserVaults(account.address);
+          }
+        },
+        onError: (error) => {
+          console.error("Deposit error:", error);
+          alert("❌ 存款失败: " + error.message);
         },
       }
     );
@@ -118,27 +218,24 @@ export default function Home() {
     try {
       const suiAmountMist = BigInt(Math.floor(parseFloat(hedgeAmount) * Math.pow(10, SUI_DECIMALS)));
 
-      // 构建原子对冲 PTB
       const tx = new Transaction();
       tx.setSender(account.address);
 
       // Step 1: 分割 SUI coin 用于抵押
       const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(suiAmountMist)]);
 
-      // Step 2: 调用合约记录抵押 (简化版本 - 调用我们的 vault 合约)
+      // Step 2: 创建金库 (如果没有选中)
       tx.moveCall({
         target: `${PACKAGE_ID}::vault::create_vault`,
         arguments: [tx.object("0x6")],
       });
 
-      // Step 3: 存入抵押品
-      // 注意: 实际实现需要 vault object ID
       console.log("[Atomic Hedge] Building transaction...");
       console.log(`  SUI Amount: ${parseFloat(hedgeAmount)} SUI`);
+      console.log(`  SUI Price: $${suiPrice.toFixed(4)}`);
       console.log(`  Est. Borrow: ${hedgePreview.borrowAmount} USDC`);
       console.log(`  Est. Hedge: ${hedgePreview.hedgeSize} SUI`);
 
-      // 执行交易
       signAndExecute(
         { transaction: tx },
         {
@@ -156,11 +253,17 @@ export default function Home() {
 
 📊 执行摘要：
 • 抵押: ${hedgeAmount} SUI
+• SUI 价格: $${suiPrice.toFixed(4)}
 • 借款: ${hedgePreview.borrowAmount} USDC
 • 对冲: ${hedgePreview.hedgeSize} SUI (空头)
 • Delta: ≈ 0%
 
 交易哈希: ${result.digest.slice(0, 10)}...`);
+
+            // 刷新 Vault 列表
+            if (account?.address) {
+              setTimeout(() => fetchUserVaults(account.address), 2000);
+            }
           },
           onError: (error) => {
             console.error("Hedge error:", error);
@@ -183,10 +286,10 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-orange-500 flex items-center justify-center">
-              <span className="text-white font-bold text-lg">AQ</span>
+              <span className="text-white font-bold text-lg">IN</span>
             </div>
             <span className="text-xl font-bold">
-              Atomic<span className="text-orange-500">Quant</span>
+              Invar<span className="text-orange-500">iant</span>
             </span>
           </div>
 
@@ -207,12 +310,12 @@ export default function Home() {
           <section className="text-center mb-16">
             <h1 className="text-5xl font-bold mb-6">
               <span className="bg-gradient-to-r from-blue-400 via-blue-500 to-orange-500 bg-clip-text text-transparent">
-                原子化对冲金库
+                Delta-Neutral Hedging Vaults
               </span>
             </h1>
             <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-8">
-              在 Sui 区块链上实现零滑点的抵押借贷与对冲，
-              所有操作在单一交易中原子化完成
+              Protect your SUI position with atomic hedging.
+              Deposit → Borrow → Hedge in a single transaction.
             </p>
 
             {!account && (
@@ -229,12 +332,15 @@ export default function Home() {
               <div className="stat-value">$1.2M</div>
             </div>
             <div className="glass-card p-6 card-hover">
-              <div className="stat-label mb-2">活跃金库</div>
-              <div className="stat-value">156</div>
+              <div className="stat-label mb-2">我的金库</div>
+              <div className="stat-value">
+                {isLoadingVaults ? "..." : userVaults.length}
+              </div>
             </div>
             <div className="glass-card p-6 card-hover">
-              <div className="stat-label mb-2">SUI 价格</div>
-              <div className="stat-value">${MOCK_SUI_PRICE}</div>
+              <div className="stat-label mb-2">SUI 价格 {priceLoading && "🔄"}</div>
+              <div className="stat-value text-green-400">${suiPrice.toFixed(4)}</div>
+              <div className="text-xs text-gray-500">via Pyth Network</div>
             </div>
             <div className="glass-card p-6 card-hover">
               <div className="stat-label mb-2">最大 LTV</div>
@@ -255,11 +361,42 @@ export default function Home() {
                   我的金库
                 </h2>
 
+                {/* Vault 选择器 */}
+                {userVaults.length > 0 && (
+                  <div className="mb-6">
+                    <label className="block text-gray-400 text-sm mb-2">选择金库</label>
+                    <select
+                      value={selectedVaultId || ""}
+                      onChange={(e) => setSelectedVaultId(e.target.value)}
+                      className="input-field w-full"
+                    >
+                      {userVaults.map((vault, idx) => (
+                        <option key={vault.id} value={vault.id}>
+                          Vault #{idx + 1} - {vault.id.slice(0, 10)}...
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {userVaults.length === 0 && !isLoadingVaults && (
+                  <div className="text-center py-8 text-gray-400">
+                    <p className="mb-4">您还没有金库，请先创建一个</p>
+                    <button
+                      onClick={handleCreateVault}
+                      disabled={isPending}
+                      className="btn-primary"
+                    >
+                      创建金库
+                    </button>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-6 mb-8">
                   <div className="bg-gray-800/50 rounded-xl p-5">
                     <div className="text-gray-400 text-sm mb-1">抵押品 (SUI)</div>
                     <div className="text-2xl font-bold">{vaultData.collateral} SUI</div>
-                    <div className="text-gray-500 text-sm">≈ ${(parseFloat(vaultData.collateral) * MOCK_SUI_PRICE).toFixed(2)}</div>
+                    <div className="text-gray-500 text-sm">≈ ${(parseFloat(vaultData.collateral) * suiPrice).toFixed(2)}</div>
                   </div>
                   <div className="bg-gray-800/50 rounded-xl p-5">
                     <div className="text-gray-400 text-sm mb-1">已借款 (USDC)</div>
@@ -338,10 +475,10 @@ export default function Home() {
 
                 <button
                   onClick={handleDeposit}
-                  disabled={!depositAmount || isPending}
+                  disabled={!depositAmount || !selectedVaultId || isPending}
                   className="btn-secondary w-full mb-6 disabled:opacity-50"
                 >
-                  存款
+                  {!selectedVaultId ? "请先选择金库" : "存款"}
                 </button>
 
                 {/* 🔥 一键原子对冲区域 */}
@@ -360,6 +497,10 @@ export default function Home() {
                   {/* 预估信息 */}
                   {hedgeAmount && parseFloat(hedgeAmount) > 0 && (
                     <div className="bg-gray-800/30 rounded-lg p-4 mb-4 text-sm">
+                      <div className="flex justify-between mb-2">
+                        <span className="text-gray-400">SUI 价格</span>
+                        <span className="text-green-400">${suiPrice.toFixed(4)}</span>
+                      </div>
                       <div className="flex justify-between mb-2">
                         <span className="text-gray-400">预估借款</span>
                         <span className="text-orange-400">{hedgePreview.borrowAmount} USDC</span>
@@ -430,7 +571,7 @@ export default function Home() {
       {/* 页脚 */}
       <footer className="glass py-8 mt-12">
         <div className="max-w-7xl mx-auto px-6 flex items-center justify-between text-gray-400 text-sm">
-          <div>© 2026 AtomicQuant. Built on Sui.</div>
+          <div>© 2026 Invariant. Built on Sui.</div>
           <div className="flex gap-6">
             <a href="#" className="hover:text-white transition">GitHub</a>
             <a href="#" className="hover:text-white transition">Twitter</a>

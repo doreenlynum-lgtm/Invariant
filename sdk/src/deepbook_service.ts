@@ -7,6 +7,11 @@ import { Transaction } from "@mysten/sui/transactions";
 import type { DeepBookConfig } from "./config.js";
 import { DEEPBOOK_CONFIG, COIN_TYPES, type NetworkType } from "./config.js";
 
+// SuiClient type (using any for SDK version compatibility)
+type SuiClientLike = {
+    getOwnedObjects: (params: any) => Promise<any>;
+};
+
 // ============================================================================
 // 类型定义
 // ============================================================================
@@ -52,10 +57,81 @@ export interface OrderResult {
 export class DeepBookService {
     private config: DeepBookConfig;
     private network: NetworkType;
+    private client?: SuiClientLike;
+    private accountCapId?: string;
 
-    constructor(network: NetworkType = "mainnet") {
+    constructor(network: NetworkType = "mainnet", client?: SuiClientLike) {
         this.config = DEEPBOOK_CONFIG[network];
         this.network = network;
+        this.client = client;
+    }
+
+    /**
+     * 设置 Sui Client (用于查询 AccountCap)
+     */
+    setClient(client: SuiClientLike): void {
+        this.client = client;
+    }
+
+    /**
+     * 设置 AccountCap ID (外部提供)
+     */
+    setAccountCapId(accountCapId: string): void {
+        this.accountCapId = accountCapId;
+    }
+
+    /**
+     * 查询用户的 DeepBook AccountCap
+     */
+    async fetchAccountCap(ownerAddress: string): Promise<string | null> {
+        if (!this.client) {
+            console.warn("[DeepBookService] No client set, cannot fetch AccountCap");
+            return null;
+        }
+
+        try {
+            const objects = await this.client.getOwnedObjects({
+                owner: ownerAddress,
+                filter: {
+                    StructType: `${this.config.packageId}::clob_v2::AccountCap`
+                },
+                options: { showContent: true }
+            });
+
+            if (objects.data.length > 0 && objects.data[0].data) {
+                this.accountCapId = objects.data[0].data.objectId;
+                return this.accountCapId ?? null;
+            }
+        } catch (error) {
+            console.warn("[DeepBookService] Failed to fetch AccountCap:", error);
+        }
+
+        return null;
+    }
+
+    /**
+     * 确保 AccountCap 存在 (查询或创建)
+     * 返回是否需要在交易中创建新的 AccountCap
+     */
+    async ensureAccountCap(
+        tx: Transaction,
+        ownerAddress: string
+    ): Promise<{ needsCreation: boolean; accountCapId?: string }> {
+        // 如果已经设置，直接返回
+        if (this.accountCapId) {
+            return { needsCreation: false, accountCapId: this.accountCapId };
+        }
+
+        // 尝试从链上查询
+        const existingCap = await this.fetchAccountCap(ownerAddress);
+        if (existingCap) {
+            return { needsCreation: false, accountCapId: existingCap };
+        }
+
+        // 需要在交易中创建
+        console.log("[DeepBookService] AccountCap not found, adding creation to TX");
+        this.addCreateAccount(tx);
+        return { needsCreation: true };
     }
 
     // ==========================================================================
@@ -213,10 +289,19 @@ export class DeepBookService {
         return COIN_TYPES.USDC[this.network];
     }
 
-    /** 获取 AccountCap ID (占位符 - 需要链上创建) */
+    /** 获取 AccountCap ID */
     private getAccountCapId(): string {
-        // 实际使用时需要从链上查询或创建
+        if (this.accountCapId) {
+            return this.accountCapId;
+        }
+        // 如果没有设置，返回占位符（但会在调用前被 ensureAccountCap 处理）
+        console.warn("[DeepBookService] AccountCap not set, transaction may fail");
         return "0x...";
+    }
+
+    /** 获取已设置的 AccountCap ID (外部使用) */
+    getAccountCapIdOrNull(): string | undefined {
+        return this.accountCapId;
     }
 
     // ==========================================================================
