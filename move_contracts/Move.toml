@@ -1,0 +1,10 @@
+[package]
+name = "atomic_quant"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "mainnet-v1.38.3" }
+
+[addresses]
+atomic_quant = "0x0"

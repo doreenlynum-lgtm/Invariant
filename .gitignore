@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Sui Move
+build/
+*.lock
+
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*_output.txt
+tsc_errors.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Build outputs
+dist/
+coverage/

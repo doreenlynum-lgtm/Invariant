@@ -1,0 +1,30 @@
+{
+  "name": "@saq/sdk",
+  "version": "0.1.0",
+  "description": "Sui-AtomicQuant SDK - Atomic Hedge PTB Builder",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/example.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^2.2.0",
+    "@mysten/deepbook-v3": "^1.0.1",
+    "@scallop-io/sui-scallop-sdk": "^2.3.14",
+    "@pythnetwork/pyth-sui-js": "^2.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "tsx": "^4.19.2",
+    "vitest": "^3.0.4",
+    "@types/node": "^22.10.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
