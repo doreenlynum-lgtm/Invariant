@@ -30,3 +30,6 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
+
+# AI
+.trae/
