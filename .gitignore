@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+dist/
+coverage/
 
 # Next.js
 .next/
@@ -28,7 +30,3 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
-
-# Build outputs
-dist/
-coverage/
